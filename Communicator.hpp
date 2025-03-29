@@ -1,8 +1,11 @@
 #pragma once
 #include <atomic>
 #include <boost/asio.hpp>
+#include <boost/asio/deadline_timer.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/address.hpp>
+#include <boost/asio/ip/address_v6.hpp>
+#include <boost/asio/ip/udp.hpp>
 #include <chrono>
 #include <cppSwarmLib/Logger.hpp>
 #include <memory>
@@ -121,34 +124,45 @@ public:
     socket.open(ip::udp::v4());
     socket.set_option(socket_base::broadcast(true));
 
+    // Отправка broadcast
     const std::string msg = "DISCOVER_SWARM_DEVICE";
     socket.send_to(
         boost::asio::buffer(msg),
         ip::udp::endpoint(ip::address_v4::broadcast(), discovery_port));
 
     std::vector<std::string> devices;
+    char recv_buffer[1024];
     ip::udp::endpoint sender;
-    char recv_buffer[1024]; // Исправленное имя буфера
 
-    // socket.set_option(socket_base::receive_timeout(500ms));
-    try {
-      while (running) {
-        size_t bytes =
-            socket.receive_from(boost::asio::buffer(recv_buffer), sender);
-        // Используем recv_buffer вместо buffer
-        bl.info("3");
-        if (std::string(recv_buffer, bytes) != "SWARM_DEVICE_RESPONSE" ||
-            true) {
-          bl.info(std::string(recv_buffer, bytes),
-                  sender.address().to_string());
+    // Исправленный таймаут
+    socket.non_blocking(true); // Включаем неблокирующий режим
+    deadline_timer timer(svc);
+    // timer.expires_from_now(500ms);
+    timer.expires_from_now(deadline_timer::duration_type(0, 0, 0.5));
+
+    // Асинхронное ожидание
+    bool timeout = false;
+    timer.async_wait([&](const boost::system::error_code &) {
+      timeout = true;
+      socket.cancel();
+    });
+
+    while (running && !timeout) {
+      boost::system::error_code ec;
+      size_t bytes =
+          socket.receive_from(boost::asio::buffer(recv_buffer, 1024), sender,
+                              0, // flags
+                              ec);
+
+      if (ec) {
+        if (std::string(recv_buffer, bytes) == "SWARM_DEVICE_RESPONSE") {
           devices.push_back(sender.address().to_string());
         }
-        bl.info("1");
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        bl.info("1");
+      } else if (ec != error::would_block) {
         break;
       }
-    } catch (...) {
+
+      svc.poll(); // Обрабатываем таймер
     }
 
     bl.info("Discovered " + std::to_string(devices.size()) + " devices");
